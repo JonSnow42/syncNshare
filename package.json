@@ -1,0 +1,8 @@
+{
+  "name": "syncnshare",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small social listening room demo",
+  "scripts": { "start": "node --env-file-if-exists=.env server.js", "dev": "node --env-file-if-exists=.env server.js", "check": "node --check server.js && node --check public/app.js" },
+  "engines": { "node": ">=20.12" }
+}
