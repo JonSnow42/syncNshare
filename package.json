@@ -3,6 +3,18 @@
   "version": "1.0.0",
   "private": true,
   "description": "A small social listening room demo",
-  "scripts": { "start": "node --env-file-if-exists=.env server.js", "dev": "node --env-file-if-exists=.env server.js", "check": "node --check server.js && node --check public/app.js" },
-  "engines": { "node": ">=20.12" }
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env server.js",
+    "check": "node --check server.js && node --check public/app.js && node --check postgres-store.js && node --check postgres-config.js && node --check 'api/[...path].js' && node --check scripts/migrate.js && node --check scripts/import-json.js",
+    "db:migrate": "node --env-file-if-exists=.env scripts/migrate.js",
+    "db:import": "node --env-file-if-exists=.env scripts/import-json.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.8",
+    "pg": "^8.23.1"
+  }
 }
