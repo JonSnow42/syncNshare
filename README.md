@@ -8,8 +8,9 @@ A compact social listening demo for small groups. It uses Node.js built-ins, a J
 - Optional Google single sign-on (OAuth 2.0 / OpenID Connect).
 - Profiles with editable display name and bio; activity visibility for everyone, followers, or only yourself.
 - Follow/unfollow and profile activity visibility checks on the server.
-- Public rooms and private rooms protected by invitation codes.
-- Room members, host permissions, shared track selection and playback status.
+- Public and private rooms with invitation codes, host close/restart, member permissions, and shared playback state.
+- Personal listening, audience-controlled sharing, account discovery, followers and Close Friends access.
+- Shared listening sessions with join/leave, participants, chat, approximate single-video playback sync, and host-approved song requests.
 - YouTube video and full-playlist links in the queue, votes, host track removal, and member-only room chat.
 - Responsive dark UI; room state and chat refresh every four seconds.
 
@@ -22,7 +23,9 @@ npm run check
 npm start
 ```
 
-Open <http://localhost:3000>. Data is stored in `.data/database.json`; `.data` is ignored by Git. Copy `.env.example` to `.env` to configure the server; `npm start` loads it. Set `PORT` or `DATA_DIR` to change the defaults. Sessions survive page reloads for 30 days but are held in memory, so a server restart signs users out.
+Open <http://localhost:3000>. Data is stored in `.data/database.json`; `.data` is ignored by Git. Copy `.env.example` to `.env` to configure the server; `npm start` loads it. Set `PORT` or `DATA_DIR` to change the defaults. Login sessions last up to 30 days and are stored as SHA-256 token hashes in the JSON data file.
+
+For local multi-port testing, run each process with a different `PORT` and the same `DATA_DIR`, for example `DATA_DIR=.data PORT=3001 npm start` and `DATA_DIR=.data PORT=3002 npm start`. API requests reload the shared JSON data while holding a local file lock. Instances using different data directories do not share accounts, sessions, or playback state.
 
 ### Enable Google sign-in
 
@@ -38,11 +41,11 @@ To make the public deployment reliable, provision a persistent Node host and dur
 
 The server persists users, follows, rooms, memberships, queue items, votes, and messages to a local JSON file. Password hashes use per-user random salts and Node's scrypt; session cookies are HttpOnly and SameSite=Lax. Every room content endpoint checks membership. Private-room lookup requires an invitation code; room IDs alone do not authorize access. Only the host changes shared playback or removes queue items. Follow and vote uniqueness is enforced by checking and replacing the relevant relation before save.
 
-This local JSON store is a single-process demo database: it does not provide transactional concurrency across multiple server instances, managed backups, Supabase RLS, or horizontally scaled realtime. Do not use it for sensitive or production workloads.
+This local JSON store coordinates concurrent requests between processes on the same machine when they share a data directory. It does not provide distributed transactions across machines, managed backups, Supabase RLS, or horizontally scaled realtime. Do not use it for sensitive or production workloads.
 
 ## Music and sync notes
 
-Videos and playlists are embedded with YouTube's official iframe player (privacy-enhanced domain); the app does not download or proxy audio. Add individual YouTube links one at a time, or paste a playlist link to add the complete playlist as one queue item. The embedded player plays the playlist in YouTube's order. Public or unlisted playlists that YouTube allows to embed are supported; private, deleted, restricted, or otherwise unembeddable content may fail. Playlist items are voted/queued as a group rather than expanded into separate app queue rows. The host controls selected queue item and a persisted playing/paused indicator; playback timing is not synchronized, and each listener may need to press play due to browser autoplay restrictions.
+Videos and playlists are embedded from YouTube; the app does not download or proxy audio. Single videos use the YouTube IFrame Player API and synchronize playback state and approximate position through server polling. Playlist links use YouTube's playlist embed and are queued as one item; playlist player state is not corrected through the JavaScript synchronization callbacks. Autoplay, buffering, ads, embedding restrictions, and network delay can affect playback; listeners may need to activate playback manually.
 
 ## Demo setup
 

@@ -12,3 +12,5 @@ body{background:#10100f;color:#ecece7;font-size:14px;line-height:1.5}
 .auth-card h1{font-size:28px;letter-spacing:-1px}.auth-error{margin-top:14px;padding:10px 12px;background:#33221d;border:1px solid #684238;border-radius:6px;color:#ffc2ad;font-size:12px}.queue-type{color:#d6fa62;font:9px 'DM Mono',monospace;letter-spacing:.5px}.chat-card{border-radius:9px}.modal{background:#1b1b19;border-color:#383833;border-radius:9px}.invite{background:#282922;color:#d6fa62;border-radius:6px}
 @media(max-width:800px){.shell{padding:0 18px}.topbar{height:66px}.main{padding-top:30px}}
 @media(max-width:420px){.card{padding:16px}}
+
+.player #yt-player{width:100%;height:100%}.player #yt-player iframe{width:100%;height:100%;border:0}
