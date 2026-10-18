@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --env-file-if-exists=.env server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check postgres-store.js && node --check postgres-config.js && node --check 'api/[...path].js' && node --check scripts/migrate.js && node --check scripts/import-json.js",
+    "check": "node --check server.js && node --check public/app.js && node --check postgres-store.js && node --check postgres-config.js && node --check api/index.js && node --check scripts/migrate.js && node --check scripts/import-json.js",
     "db:migrate": "node --env-file-if-exists=.env scripts/migrate.js",
     "db:import": "node --env-file-if-exists=.env scripts/import-json.js"
   },
