@@ -308,6 +308,34 @@ function roomView(r, viewer) {
   };
 }
 async function body(req) {
+  // Vercel's Node.js runtime exposes parsed JSON through req.body. The local
+  // HTTP server does not, so retain the stream parser as the fallback.
+  if ("body" in req) {
+    let parsed;
+    try {
+      parsed = req.body;
+    } catch {
+      throw Object.assign(new Error("Invalid JSON"), { status: 400 });
+    }
+    if (parsed === undefined || parsed === null) return {};
+    if (Buffer.isBuffer(parsed)) parsed = parsed.toString("utf8");
+    if (typeof parsed === "string") {
+      if (Buffer.byteLength(parsed) > 20000)
+        throw Object.assign(new Error("Request too large"), { status: 413 });
+      try {
+        return parsed ? JSON.parse(parsed) : {};
+      } catch {
+        throw Object.assign(new Error("Invalid JSON"), { status: 400 });
+      }
+    }
+    if (typeof parsed === "object") {
+      if (Buffer.byteLength(JSON.stringify(parsed)) > 20000)
+        throw Object.assign(new Error("Request too large"), { status: 413 });
+      return parsed;
+    }
+    throw Object.assign(new Error("Invalid JSON"), { status: 400 });
+  }
+
   let raw = "";
   for await (const c of req) {
     raw += c;
@@ -1560,6 +1588,12 @@ async function route(req, res) {
     });
   } catch (e) {
     if (e.code === "ENOENT") return send(res, 404, { error: "Not found" });
+    console.error("API route failed", {
+      method,
+      path: p,
+      name: e.name,
+      code: e.code,
+    });
     send(res, e.status || 500, {
       error: e.status ? e.message : "Something went wrong.",
     });
