@@ -7,7 +7,8 @@ let me = null,
   ytReady = false,
   ytVideoKey = "",
   syncGuard = false,
-  lastSyncPost = 0;
+  lastSyncPost = 0,
+  currentRoomTab = "queue";
 function loadYouTubeApi() {
   if (window.YT?.Player) {
     ytReady = true;
@@ -51,6 +52,11 @@ function startPlayer(r) {
               status: e.data === YT.PlayerState.PLAYING ? "playing" : "paused",
               position: ytPlayer.getCurrentTime() || 0,
             });
+          }
+          if (r.host && e.data === YT.PlayerState.ENDED) {
+            api(`/rooms/${r.id}/next`, { method: "POST" })
+              .then(() => refreshRoom(r.id))
+              .catch(() => {});
           }
         },
       },
@@ -102,6 +108,24 @@ const esc = (s) =>
         c
       ],
   );
+function trackYoutubeUrl(x) {
+  if (!x) return "";
+  if (x.type === "playlist" && x.playlistId) {
+    return `https://www.youtube.com/playlist?list=${encodeURIComponent(x.playlistId)}`;
+  }
+  if (x.videoId) {
+    return `https://www.youtube.com/watch?v=${encodeURIComponent(x.videoId)}`;
+  }
+  return "";
+}
+function formatChatMessage(text) {
+  const escaped = esc(text);
+  return escaped.replace(
+    /(https?:\/\/[^\s]+)/g,
+    (url) =>
+      `<a href="${url}" target="_blank" rel="noopener noreferrer" class="chat-link">${url} ↗</a>`,
+  );
+}
 async function api(path, opts = {}) {
   const r = await fetch("/api" + path, {
     credentials: "same-origin",
@@ -128,7 +152,10 @@ function avatar(u) {
     : `<div class="avatar">${esc((u.name || u.username || "?").slice(0, 1).toUpperCase())}</div>`;
 }
 function nav(on = "home") {
-  return `<header class="topbar"><a class="brand" href="#home"><span class="brandmark">♫</span>sync<em>&</em>share</a><nav class="nav"><a href="#corner" class="${on === "corner" ? "active" : ""}">Your Corner</a><a href="#people" class="${on === "people" ? "active" : ""}">Peoples</a><a href="#discover" class="${on === "discover" ? "active" : ""}">Rooms</a><a href="#profile" class="profile-chip">${esc(me.name)}</a><button id="logout">Log out</button></nav></header>`;
+  const reqBadge = me?.incomingRequestsCount
+    ? `<span class="tab-badge warning" style="margin-left:4px">${me.incomingRequestsCount}</span>`
+    : "";
+  return `<header class="topbar"><a class="brand" href="#home"><span class="brandmark">♫</span>sync<em>&</em>share</a><nav class="nav"><a href="#corner" class="${on === "corner" ? "active" : ""}">Your Corner</a><a href="#people" class="${on === "people" ? "active" : ""}">Find Friends${reqBadge}</a><a href="#discover" class="${on === "discover" ? "active" : ""}">Rooms</a><a href="#profile" class="profile-chip">${esc(me.name)}</a><button id="logout">Log out</button></nav></header>`;
 }
 function frame(content, on) {
   app.innerHTML = `<div class="shell">${nav(on)}<main class="main">${content}</main></div>`;
@@ -161,6 +188,76 @@ async function authView(signup = false) {
     }
   };
 }
+function personActionBtn(p) {
+  if (p.isSelf) return '<span class="badge">YOU</span>';
+  const status = p.friendshipStatus || (p.following ? "friends" : "none");
+  if (status === "friends") {
+    return `<button class="button secondary small" data-friend-action="remove" data-id="${esc(p.id)}">Friends ✓</button>`;
+  }
+  if (status === "outgoing_pending") {
+    return `<button class="button secondary small" data-friend-action="cancel" data-id="${esc(p.id)}" data-request-id="${esc(p.requestId || "")}">Requested</button>`;
+  }
+  if (status === "incoming_pending") {
+    return `<div class="btn-group"><button class="button small" data-friend-action="accept" data-id="${esc(p.id)}" data-request-id="${esc(p.requestId || "")}">Accept</button><button class="button secondary small" data-friend-action="decline" data-id="${esc(p.id)}" data-request-id="${esc(p.requestId || "")}">Decline</button></div>`;
+  }
+  return `<button class="button small" data-friend-action="request" data-id="${esc(p.id)}">+ Add Friend</button>`;
+}
+function personRow(p) {
+  return `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)}${p.activity ? ` · listening in ${esc(p.activity.room)}` : ""}</small></div>${personActionBtn(p)}</div>`;
+}
+function bindFriendActions(onDone) {
+  document.querySelectorAll("[data-friend-action]").forEach((btn) => {
+    btn.onclick = async () => {
+      const action = btn.dataset.friendAction;
+      const id = btn.dataset.id;
+      const reqId = btn.dataset.requestId;
+      btn.disabled = true;
+      try {
+        if (action === "request") {
+          await api("/friends/request", {
+            method: "POST",
+            body: JSON.stringify({ targetId: id }),
+          });
+          toast("Friend request sent!");
+        } else if (action === "accept") {
+          await api("/friends/accept", {
+            method: "POST",
+            body: JSON.stringify({ requestId: reqId, userId: id }),
+          });
+          toast("Friend request accepted!");
+        } else if (action === "decline") {
+          await api("/friends/decline", {
+            method: "POST",
+            body: JSON.stringify({ requestId: reqId, userId: id }),
+          });
+          toast("Friend request declined");
+        } else if (action === "cancel") {
+          await api("/friends/cancel", {
+            method: "POST",
+            body: JSON.stringify({ requestId: reqId, targetId: id }),
+          });
+          toast("Request cancelled");
+        } else if (action === "remove") {
+          if (!confirm("Remove this friend?")) {
+            btn.disabled = false;
+            return;
+          }
+          await api("/friends/remove", {
+            method: "POST",
+            body: JSON.stringify({ targetId: id }),
+          });
+          toast("Friend removed");
+        }
+        if (onDone) await onDone();
+        else render();
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+}
 async function home() {
   const [rooms, people] = await Promise.all([api("/rooms"), api("/people")]);
   frame(
@@ -173,32 +270,12 @@ async function home() {
         )
         .join("") ||
       `<div class="empty">No public rooms yet. Create one to get started.</div>`
-    }</div></section><section class="card"><div class="card-head"><h2>People</h2><a class="eyebrow" href="#people">FIND PEOPLE →</a></div><div class="people-list">${people.people.slice(0, 4).map(personRow).join("") || `<div class="empty">No other listeners yet.</div>`}</div></section></div><div class="section card"><div class="card-head"><h2>Profile</h2><a class="eyebrow" href="#profile">EDIT PROFILE →</a></div><p class="muted" style="font-size:13px">${esc(me.bio || "Add a short bio to your profile.")}</p></div>`,
+    }</div></section><section class="card"><div class="card-head"><h2>Suggested friends</h2><a class="eyebrow" href="#people">FIND FRIENDS →</a></div><div class="people-list">${people.people.slice(0, 4).map(personRow).join("") || `<div class="empty">No new recommendations right now.</div>`}</div></section></div><div class="section card"><div class="card-head"><h2>Profile</h2><a class="eyebrow" href="#profile">EDIT PROFILE →</a></div><p class="muted" style="font-size:13px">${esc(me.bio || "Add a short bio to your profile.")}</p></div>`,
     "home",
   );
   bindCreate();
   bindJoin();
-  bindFollow();
-}
-function personRow(p) {
-  return `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)}${p.activity ? ` · listening in ${esc(p.activity.room)}` : ""}</small></div><button class="button secondary small" data-follow="${esc(p.id)}">${p.following ? "Following" : "Follow"}</button></div>`;
-}
-function bindFollow() {
-  document.querySelectorAll("[data-follow]").forEach(
-    (b) =>
-      (b.onclick = async () => {
-        try {
-          const d = await api(
-            `/people/${encodeURIComponent(b.dataset.follow)}/follow`,
-            { method: "POST" },
-          );
-          b.textContent = d.following ? "Following" : "Follow";
-          toast(d.following ? "Following" : "Unfollowed");
-        } catch (e) {
-          toast(e.message);
-        }
-      }),
-  );
+  bindFriendActions(home);
 }
 function bindJoin() {
   document.querySelectorAll("[data-join]").forEach(
@@ -307,9 +384,22 @@ async function profile(username) {
     : await api("/me");
   const u = d.user,
     own = !username,
-    following = d.followingUsers || [];
+    friends = d.friendsUsers || d.friends || d.followingUsers || [];
+  let headerBtn = "";
+  if (!own) {
+    const st = d.friendshipStatus;
+    if (st === "friends") {
+      headerBtn = `<button class="button secondary" data-friend-action="remove" data-id="${esc(u.id)}">Friends ✓ (Unfriend)</button>`;
+    } else if (st === "outgoing_pending") {
+      headerBtn = `<button class="button secondary" data-friend-action="cancel" data-id="${esc(u.id)}" data-request-id="${esc(d.requestId || "")}">Request Sent · Cancel</button>`;
+    } else if (st === "incoming_pending") {
+      headerBtn = `<div class="btn-group"><button class="button" data-friend-action="accept" data-id="${esc(u.id)}" data-request-id="${esc(d.requestId || "")}">Accept Request</button><button class="button secondary" data-friend-action="decline" data-id="${esc(u.id)}" data-request-id="${esc(d.requestId || "")}">Decline</button></div>`;
+    } else {
+      headerBtn = `<button class="button" data-friend-action="request" data-id="${esc(u.id)}">+ Add Friend</button>`;
+    }
+  }
   frame(
-    `<div class="profile-head">${avatar(u)}<div class="grow"><span class="eyebrow">${own ? "YOUR PROFILE" : "LISTENER PROFILE"}</span><h1>${esc(u.name)}</h1><p>@${esc(u.username)}</p></div>${own ? "" : `<button class="button ${d.following ? "secondary" : ""}" id="profile-follow">${d.following ? "Following" : "Follow"}</button>`}</div><div class="grid"><section class="card"><div class="card-head"><h2>About ${own ? "you" : esc(u.name)}</h2>${own ? '<button class="button secondary small" id="edit">Edit profile</button>' : ""}</div><p class="muted" style="font-size:13px">${esc(u.bio || "No bio yet.")}</p></section><section class="card"><div class="card-head"><h2>Listening now</h2><span class="badge">${d.activity ? "SHARING" : "NOT SHARING"}</span></div>${d.activity ? `<p>${esc(d.activity.title || "YouTube video")}<small class="subline">${d.activity.playback === "playing" ? "Playing" : "Paused"} · ${esc(d.activity.audience || "shared audience")}</small></p>${!own ? `<button class="button small" id="profile-join">Join session</button>` : ""}` : `<p class="muted" style="font-size:12px">No session is currently shared with you.</p>`}</section></div><section class="card section"><div class="card-head"><h2>${own ? "Following" : "Following"}</h2><span class="badge">${following.length} ACCOUNTS</span></div><div class="people-list">${following.map((p) => `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)}</small></div></div>`).join("") || '<div class="empty">This account follows nobody yet.</div>'}</div></section>${own ? `<section class="card section"><div class="card-head"><h2>Close Friends</h2><span class="badge">FOLLOWING ONLY</span></div><p class="footer-note">Close Friends are selected from accounts you already follow. Following someone does not add them automatically.</p><div id="profile-close-friends"></div></section><section class="card section"><h2>Activity privacy</h2><label class="label">Profile visibility</label><select class="select" id="visibility"><option value="everyone" ${u.visibility === "everyone" ? "selected" : ""}>Everyone</option><option value="followers" ${u.visibility === "followers" ? "selected" : ""}>People who follow you</option><option value="nobody" ${u.visibility === "nobody" ? "selected" : ""}>Nobody but you</option></select></section>` : ""}`,
+    `<div class="profile-head">${avatar(u)}<div class="grow"><span class="eyebrow">${own ? "YOUR PROFILE" : "LISTENER PROFILE"}</span><h1>${esc(u.name)}</h1><p>@${esc(u.username)}</p></div>${headerBtn}</div><div class="grid"><section class="card"><div class="card-head"><h2>About ${own ? "you" : esc(u.name)}</h2>${own ? '<button class="button secondary small" id="edit">Edit profile</button>' : ""}</div><p class="muted" style="font-size:13px">${esc(u.bio || "No bio yet.")}</p></section><section class="card"><div class="card-head"><h2>Listening now</h2><span class="badge">${d.activity ? "SHARING" : "NOT SHARING"}</span></div>${d.activity ? `<p>${esc(d.activity.title || "YouTube video")}<small class="subline">${d.activity.playback === "playing" ? "Playing" : "Paused"} · ${esc(d.activity.audience || "shared audience")}</small></p>${!own ? `<button class="button small" id="profile-join">Join session</button>` : ""}` : `<p class="muted" style="font-size:12px">No session is currently shared with you.</p>`}</section></div><section class="card section"><div class="card-head"><h2>Friends</h2><span class="badge">${friends.length} FRIENDS</span></div><div class="people-list">${friends.map((p) => `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)}</small></div></div>`).join("") || '<div class="empty">No friends added yet.</div>'}</div></section>${own ? `<section class="card section"><div class="card-head"><h2>Close Friends</h2><span class="badge">FRIENDS ONLY</span></div><p class="footer-note">Close Friends are selected from accounts you are friends with.</p><div id="profile-close-friends"></div></section><section class="card section"><h2>Activity privacy</h2><label class="label">Profile visibility</label><select class="select" id="visibility"><option value="everyone" ${u.visibility === "everyone" ? "selected" : ""}>Everyone</option><option value="followers" ${u.visibility === "followers" || u.visibility === "friends" ? "selected" : ""}>Friends only</option><option value="nobody" ${u.visibility === "nobody" ? "selected" : ""}>Nobody but you</option></select></section>` : ""}`,
     "profile",
   );
   if (own) {
@@ -338,17 +428,7 @@ async function profile(username) {
     };
     loadCloseFriends("#profile-close-friends");
   } else {
-    document.querySelector("#profile-follow").onclick = async () => {
-      try {
-        const x = await api(`/people/${encodeURIComponent(u.id)}/follow`, {
-          method: "POST",
-        });
-        toast(x.following ? "Following" : "Unfollowed");
-        await profile(username);
-      } catch (e) {
-        toast(e.message);
-      }
-    };
+    bindFriendActions(() => profile(username));
     document
       .querySelector("#profile-join")
       ?.addEventListener("click", async () => {
@@ -441,6 +521,10 @@ async function room(id) {
     return;
   }
   const q = r.nowPlaying;
+  const currentIndex = r.queue.findIndex((x) => x.id === r.currentQueueId);
+  const hasPrev = currentIndex > 0;
+  const hasNext =
+    currentIndex >= 0 ? currentIndex < r.queue.length - 1 : r.queue.length > 0;
   const invite = sessionStorage.getItem("newInvite");
   const embed = q
     ? q.type === "playlist"
@@ -448,7 +532,7 @@ async function room(id) {
       : `https://www.youtube-nocookie.com/embed/${encodeURIComponent(q.videoId)}?enablejsapi=1&origin=${encodeURIComponent(location.origin)}`
     : "";
   frame(
-    `<div class="room-top"><div><span class="eyebrow">${r.isPrivate ? "PRIVATE ROOM" : "PUBLIC ROOM"}</span><h1>${esc(r.name)}</h1><span class="muted" style="font-size:11px">${r.members.length} ${r.members.length === 1 ? "member" : "members"} · ${r.host ? "Host" : "Member"} · Active</span></div>${r.host ? '<button class="button danger small" id="close-room">Close room</button>' : ""}<button class="button secondary small" id="leave">Leave room</button></div>${invite ? `<div class="card" style="margin-bottom:14px"><b>Invite people to this private room</b><div class="invite">${esc(invite)}</div><small class="subline">Share this code with people you want to join.</small></div>` : ""}<div class="room-layout"><div><section class="card"><div class="card-head"><h2>${q ? esc(q.title) : "Now playing"}</h2><span class="badge">${r.playback === "playing" ? "PLAYING" : "PAUSED"}</span></div><div class="player">${q ? (q.type === "playlist" ? `<iframe title="YouTube playlist" src="${embed}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>` : `<div id="yt-player"></div>`) : `<div class="player-placeholder">♫<b>No selection</b>Add a YouTube video or playlist.</div>`}</div><div class="members">${r.members.map((m) => `<span class="member-pill">${esc(m.user.name)}${m.role === "host" ? " · host" : ""}</span>`).join("")}</div>${r.host ? `<div class="track-form"><button class="button small" id="playstate">${r.playback === "playing" ? "Pause" : "Play"}</button>${q ? `<span class="muted" style="font-size:10px;align-self:center">Playback may require a click if your browser blocks autoplay.</span>` : ""}</div>` : `<p class="footer-note">The host selects and controls playback. Browser autoplay settings may require a click.</p>`}<form id="trackform" class="track-form"><input class="input" name="url" required placeholder="Paste a YouTube video or playlist link"><input class="input" name="title" maxlength="100" placeholder="Title (optional)"><button class="button">Add to queue</button></form><p class="footer-note">Playlist links play through YouTube’s embedded player. Video availability and autoplay depend on YouTube and your browser.</p></section><section class="card section"><div class="card-head"><h2>Queue</h2><span class="badge">${r.queue.length} ${r.queue.length === 1 ? "ITEM" : "ITEMS"}</span></div><div class="track-list">${r.queue.map((x, i) => `<div class="track ${x.id === r.currentQueueId ? "active" : ""}"><span class="badge">${String(i + 1).padStart(2, "0")}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}${esc(x.title)}<small class="subline">Added by ${esc(x.by.name)}</small></span>${r.host ? `<button class="vote" data-play="${x.id}" title="Play this item">▶</button><button class="vote" data-remove="${x.id}" title="Remove">×</button>` : ""}<button class="vote" data-vote="${x.id}" data-value="${x.myVote === 1 ? 0 : 1}" title="Upvote">▲ ${x.votes}</button><button class="vote" data-vote="${x.id}" data-value="${x.myVote === -1 ? 0 : -1}" title="Downvote">▼</button></div>`).join("") || `<div class="empty">Add a video or playlist to start the queue.</div>`}</div></section></div><section class="card chat-card"><div class="card-head"><h2>Room chat</h2><span class="badge">ROOM MEMBERS</span></div><div id="messages" class="chat-messages">${r.messages.map(messageHtml).join("") || `<div class="empty">No messages yet.</div>`}</div><form id="chatform" class="chat-form"><input class="input" name="text" maxlength="500" required placeholder="Write a message…"><button class="button small">Send</button></form><p class="footer-note">Room updates refresh every few seconds. Chat is visible only to members.</p></section></div>`,
+    `<div class="room-top"><div><span class="eyebrow">${r.isPrivate ? "PRIVATE ROOM" : "PUBLIC ROOM"}</span><h1>${esc(r.name)}</h1><span class="muted" style="font-size:11px">${r.members.length} ${r.members.length === 1 ? "member" : "members"} · ${r.host ? "Host" : "Member"} · Active</span></div>${r.host ? '<button class="button danger small" id="close-room">Close room</button>' : ""}<button class="button secondary small" id="leave">Leave room</button></div>${invite ? `<div class="card" style="margin-bottom:14px"><b>Invite people to this private room</b><div class="invite">${esc(invite)}</div><small class="subline">Share this code with people you want to join.</small></div>` : ""}${r.host && r.pauseRequests && r.pauseRequests.length > 0 ? `<div class="card" style="margin-bottom:14px;background:#2b1d16;border:1px solid #ff7f50;padding:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#ff9e7d;border-color:#ff7f50">PAUSE REQUEST</span><span style="margin-left:8px"><b>${esc(r.pauseRequests[0].userName)}</b> requested to pause the video.</span></div><div class="btn-group"><button class="button small" id="approve-pause" data-req="${esc(r.pauseRequests[0].id)}">✓ Allow Pause</button><button class="button secondary small" id="deny-pause" data-req="${esc(r.pauseRequests[0].id)}">✕ Deny</button></div></div></div>` : ""}<div class="room-layout"><div><section class="card"><div class="card-head"><h2>${q ? `<span style="vertical-align:middle">${esc(q.title)}</span><a href="${trackYoutubeUrl(q)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a>` : "Now playing"}</h2><span class="badge">${r.playback === "playing" ? "PLAYING" : "PAUSED"}</span></div><div class="player">${q ? (q.type === "playlist" ? `<iframe title="YouTube playlist" src="${embed}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>` : `<div id="yt-player"></div>`) : `<div class="player-placeholder">♫<b>No selection</b>Add a YouTube video or playlist.</div>`}</div><div class="members">${r.members.map((m) => `<span class="member-pill">${esc(m.user.name)}${m.role === "host" ? " · host" : ""}</span>`).join("")}</div>${r.host ? `<div class="track-form" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div class="btn-group"><button class="button secondary small" id="prev-track" title="Previous in queue"${!hasPrev ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏮ Prev</button><button class="button small" id="playstate">${r.playback === "playing" ? "Pause" : "Play"}</button><button class="button secondary small" id="next-track" title="Next in queue"${!hasNext ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏭ Next</button></div>${q ? `<span class="muted" style="font-size:11px;align-self:center">Host playback active${currentIndex >= 0 ? ` · Track ${currentIndex + 1} of ${r.queue.length}` : ""}</span>` : ""}</div>` : `<div class="track-form">${r.playback === "playing" ? (r.myPauseRequest ? `<span class="badge warning">⏳ Pause Requested</span><button class="button secondary small" id="cancel-pause">Cancel Request</button><span class="muted" style="font-size:11px;align-self:center">Waiting for host approval...</span>` : `<button class="button secondary small" id="request-pause">⏸ Request Pause</button><span class="muted" style="font-size:11px;align-self:center">Video is host-driven. Request pause from host.</span>`) : `<span class="badge">PAUSED</span><span class="muted" style="font-size:11px;align-self:center">Playback is paused. Host controls resume.</span>`}</div>`}<form id="trackform" class="track-form"><input class="input" name="url" required placeholder="Paste a YouTube video or playlist link"><input class="input" name="title" maxlength="100" placeholder="Title (optional)"><button class="button">Add to queue</button></form><p class="footer-note">Playlist links play through YouTube’s embedded player. Video availability and autoplay depend on YouTube and your browser.</p></section><section class="card section"><div class="card-head" style="align-items:flex-end"><div class="tab-bar" style="margin-bottom:0;padding-bottom:0;border-bottom:none"><button class="tab-btn ${currentRoomTab === 'queue' ? 'active' : ''}" data-room-tab="queue">Queue <span class="tab-badge">${r.queue.length}</span></button><button class="tab-btn ${currentRoomTab === 'history' ? 'active' : ''}" data-room-tab="history">Played History <span class="tab-badge">${(r.history || []).length}</span></button></div><div style="display:flex;align-items:center;gap:8px">${currentRoomTab === 'queue' && r.host && r.queue.length > 0 ? `<div class="btn-group"><button class="button secondary small" id="queue-prev" title="Previous in queue"${!hasPrev ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏮ Prev</button><button class="button secondary small" id="queue-next" title="Next in queue"${!hasNext ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏭ Next</button></div>` : ""}<span class="badge">${currentRoomTab === 'queue' ? `${r.queue.length} ${r.queue.length === 1 ? 'ITEM' : 'ITEMS'}` : `${(r.history || []).length} PLAYED`}</span></div></div>${currentRoomTab === 'queue' ? `<div class="track-list">${r.queue.map((x, i) => `<div class="track ${x.id === r.currentQueueId ? "active" : ""}" data-track-id="${x.id}" title="${r.host ? "Click to play this video" : "Click to view video on YouTube"}"><span class="badge">${String(i + 1).padStart(2, "0")}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}<a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-link" title="Open video in YouTube" onclick="event.stopPropagation()">${esc(x.title)}</a><a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a><small class="subline">Added by ${esc(x.by.name)}</small></span>${r.host ? `<button class="vote" data-play="${x.id}" title="Play this item">▶</button><button class="vote" data-remove="${x.id}" title="Remove">×</button>` : ""}<button class="vote" data-vote="${x.id}" data-value="${x.myVote === 1 ? 0 : 1}" title="Upvote">▲ ${x.votes}</button><button class="vote" data-vote="${x.id}" data-value="${x.myVote === -1 ? 0 : -1}" title="Downvote">▼</button></div>`).join("") || `<div class="empty">Add a video or playlist to start the queue.</div>`}</div>` : `<div class="track-list">${(r.history || []).map((x, i) => `<div class="track" data-track-id="${x.id}" title="${r.host ? "Click to play this video" : "Click to view video on YouTube"}"><span class="badge" style="opacity:0.8">#${(r.history || []).length - i}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}<a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-link" title="Open video in YouTube" onclick="event.stopPropagation()">${esc(x.title)}</a><a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a><small class="subline">Played · Originally added by ${esc(x.by?.name || "Member")}${x.playedAt ? ` · ${new Date(x.playedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</small></span><div class="btn-group" style="margin-left:auto;gap:6px"><button class="button secondary small" data-requeue="${esc(JSON.stringify({ type: x.type, videoId: x.videoId, playlistId: x.playlistId, title: x.title }))}" title="Add back to queue">+ Re-queue</button>${r.host ? `<button class="button small" data-play-history="${esc(JSON.stringify({ type: x.type, videoId: x.videoId, playlistId: x.playlistId, title: x.title }))}" title="Play now">▶ Play</button>` : ""}</div></div>`).join("") || `<div class="empty">No songs played yet. Tracks played in this room will appear here.</div>`}</div>`}</section></div><section class="card chat-card"><div class="card-head"><h2>Room chat</h2><span class="badge">ROOM MEMBERS</span></div><div id="messages" class="chat-messages">${r.messages.map(messageHtml).join("") || `<div class="empty">No messages yet.</div>`}</div><form id="chatform" class="chat-form"><input class="input" name="text" maxlength="500" required placeholder="Write a message…"><button class="button small">Send</button></form><p class="footer-note">Room updates refresh every few seconds. Chat is visible only to members.</p></section></div>`,
     "",
   );
   if (q?.type === "video") startPlayer(r);
@@ -474,6 +558,52 @@ async function room(id) {
       toast(e.message);
     }
   };
+  document.querySelector("#request-pause")?.addEventListener("click", async () => {
+    try {
+      await api(`/rooms/${id}/pause-request`, { method: "POST" });
+      toast("Pause request sent to host!");
+      await refreshRoom(id);
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+  document.querySelector("#cancel-pause")?.addEventListener("click", async () => {
+    try {
+      await api(`/rooms/${id}/pause-request`, { method: "DELETE" });
+      toast("Pause request cancelled");
+      await refreshRoom(id);
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+  document.querySelector("#approve-pause")?.addEventListener("click", async (e) => {
+    try {
+      const reqId = e.currentTarget.dataset.req;
+      if (ytPlayer?.pauseVideo) {
+        syncGuard = true;
+        ytPlayer.pauseVideo();
+        setTimeout(() => (syncGuard = false), 500);
+      }
+      await api(`/rooms/${id}/pause-request/${reqId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ position: ytPlayer?.getCurrentTime?.() || 0 }),
+      });
+      toast("Allowed pause. Playback paused for room.");
+      await refreshRoom(id);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  document.querySelector("#deny-pause")?.addEventListener("click", async (e) => {
+    try {
+      const reqId = e.currentTarget.dataset.req;
+      await api(`/rooms/${id}/pause-request/${reqId}/deny`, { method: "POST" });
+      toast("Pause request denied. Video continues.");
+      await refreshRoom(id);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
   document.querySelector("#trackform").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.currentTarget),
@@ -562,6 +692,105 @@ async function room(id) {
         }
       }),
   );
+  document.querySelectorAll("[data-room-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      currentRoomTab = btn.dataset.roomTab;
+      const y = window.scrollY;
+      room(id).then(() => window.scrollTo(0, y));
+    };
+  });
+  document.querySelectorAll("[data-requeue]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const item = JSON.parse(b.dataset.requeue);
+        await api(`/rooms/${id}/queue`, {
+          method: "POST",
+          body: JSON.stringify(item),
+        });
+        toast("Re-added to queue!");
+        currentRoomTab = "queue";
+        await refreshRoom(id);
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+  document.querySelectorAll("[data-play-history]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const item = JSON.parse(b.dataset.playHistory);
+        const res = await api(`/rooms/${id}/queue`, {
+          method: "POST",
+          body: JSON.stringify(item),
+        });
+        const addedItem = res?.room?.queue?.[res?.room?.queue?.length - 1];
+        if (addedItem?.id) {
+          await api(`/rooms/${id}/play`, {
+            method: "POST",
+            body: JSON.stringify({
+              queueId: addedItem.id,
+              status: "playing",
+            }),
+          });
+        }
+        toast("Playing track!");
+        currentRoomTab = "queue";
+        await refreshRoom(id);
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+  const handleNext = async () => {
+    try {
+      await api(`/rooms/${id}/next`, { method: "POST" });
+      toast("Playing next track");
+      await refreshRoom(id);
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+  const handlePrev = async () => {
+    try {
+      await api(`/rooms/${id}/previous`, { method: "POST" });
+      toast("Playing previous track");
+      await refreshRoom(id);
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+  document.querySelectorAll("#prev-track, #queue-prev").forEach((btn) => {
+    btn.onclick = handlePrev;
+  });
+  document.querySelectorAll("#next-track, #queue-next").forEach((btn) => {
+    btn.onclick = handleNext;
+  });
+  document.querySelectorAll(".track[data-track-id]").forEach((trackEl) => {
+    trackEl.addEventListener("click", async (e) => {
+      if (e.target.closest("button") || e.target.closest("a")) return;
+      const tId = trackEl.dataset.trackId;
+      if (r.host && tId) {
+        if (tId !== r.currentQueueId) {
+          try {
+            await api(`/rooms/${id}/play`, {
+              method: "POST",
+              body: JSON.stringify({ queueId: tId, status: "playing" }),
+            });
+            toast("Playing selected track");
+            await refreshRoom(id);
+          } catch (err) {
+            toast(err.message);
+          }
+        }
+      } else if (tId) {
+        const item =
+          r.queue.find((t) => t.id === tId) ||
+          (r.history || []).find((t) => t.id === tId);
+        const url = trackYoutubeUrl(item);
+        if (url) window.open(url, "_blank");
+      }
+    });
+  });
   document.querySelector("#chatform").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
@@ -580,7 +809,7 @@ async function room(id) {
   poll = setInterval(() => refreshRoom(id, true), 2000);
 }
 function messageHtml(m) {
-  return `<div class="message"><b>${esc(m.user.name)}</b><time>${new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div>${esc(m.text)}</div></div>`;
+  return `<div class="message"><b>${esc(m.user.name)}</b><time>${new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div>${formatChatMessage(m.text)}</div></div>`;
 }
 async function refreshRoom(id, silent = false) {
   try {
@@ -592,7 +821,9 @@ async function refreshRoom(id, silent = false) {
       old.status !== next.status ||
       old.currentQueueId !== next.currentQueueId ||
       old.queue.length !== next.queue.length ||
-      old.messages.length !== next.messages.length
+      old.messages.length !== next.messages.length ||
+      (old.history || []).length !== (next.history || []).length ||
+      (old.pauseRequests || []).length !== (next.pauseRequests || []).length
     ) {
       const y = window.scrollY;
       room(id).then(() => window.scrollTo(0, y));
@@ -865,6 +1096,9 @@ async function loadCloseFriends(target = "#close-friends") {
     box.innerHTML = `<p class="auth-error">${esc(e.message)}</p>`;
   }
 }
+let peopleTab = "suggested";
+let peopleSearchQuery = "";
+
 function accountCard(p) {
   const status = p.activity
     ? `${esc(p.activity.title || "YouTube video")} · ${p.activity.playback === "playing" ? "Playing" : "Paused"} · ${p.activity.audience}`
@@ -873,16 +1107,32 @@ function accountCard(p) {
       : p.sharing
         ? "Sharing with another audience"
         : "Not sharing";
-  return `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)} · ${status}</small></div>${p.isSelf ? '<span class="badge">YOU</span>' : `<button class="button secondary small" data-follow="${esc(p.id)}">${p.following ? "Following" : "Follow"}</button>`}${p.activity?.sessionId ? `<button class="button small" data-session="${esc(p.activity.sessionId)}">Join</button>` : `<button class="button secondary small" disabled>${p.isSelf ? "Your Corner" : p.sharing ? "Not eligible" : "Unavailable"}</button>`}</div>`;
+  const action = p.isSelf ? '<span class="badge">YOU</span>' : personActionBtn(p);
+  const sessionBtn = p.activity?.sessionId
+    ? `<button class="button small" data-session="${esc(p.activity.sessionId)}">Join</button>`
+    : "";
+  return `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)} · ${status}</small></div><div class="card-actions">${action}${sessionBtn}</div></div>`;
 }
+
+function requestCard(r, isIncoming) {
+  const u = r.user;
+  const actions = isIncoming
+    ? `<div class="btn-group"><button class="button small" data-friend-action="accept" data-request-id="${esc(r.requestId)}" data-id="${esc(u.id)}">Accept</button><button class="button secondary small" data-friend-action="decline" data-request-id="${esc(r.requestId)}" data-id="${esc(u.id)}">Decline</button></div>`
+    : `<button class="button secondary small" data-friend-action="cancel" data-request-id="${esc(r.requestId)}" data-id="${esc(u.id)}">Cancel Request</button>`;
+  return `<div class="person-row">${avatar(u)}<div class="grow"><a href="#profile/${encodeURIComponent(u.username)}"><b>${esc(u.name)}</b></a><small>@${esc(u.username)} · ${isIncoming ? "Wants to be friends" : "Request pending"}</small></div>${actions}</div>`;
+}
+
 async function peoples() {
   frame(
-    '<div class="empty">Loading accounts and shared sessions…</div>',
+    '<div class="empty">Loading accounts and recommendations…</div>',
     "people",
   );
   let d;
   try {
-    d = await api("/peoples");
+    const url = peopleSearchQuery
+      ? `/peoples?q=${encodeURIComponent(peopleSearchQuery)}`
+      : "/peoples";
+    d = await api(url);
   } catch (e) {
     frame(
       `<div class="empty">Could not load Peoples: ${esc(e.message)} <button class="button small" id="retry-peoples">Retry</button></div>`,
@@ -891,45 +1141,99 @@ async function peoples() {
     document.querySelector("#retry-peoples").onclick = peoples;
     return;
   }
+
+  const recommendations = d.recommendations || [];
+  const searchResults = d.searchResults || null;
+  const friends = d.friends || [];
+  const incoming = d.incomingRequests || [];
+  const outgoing = d.outgoingRequests || [];
+  const hasIncoming = incoming.length > 0;
+
+  let bodyContent = "";
+  if (searchResults !== null) {
+    bodyContent = `<div class="card-head"><h2>Search Results for "${esc(peopleSearchQuery)}"</h2><span class="badge">${searchResults.length} FOUND</span></div>
+      <div class="people-list">${searchResults.map(accountCard).join("") || '<div class="empty">No listeners matched your search. Try another username or name.</div>'}</div>`;
+  } else if (peopleTab === "requests") {
+    bodyContent = `
+      <div class="requests-subhead">Incoming Requests (${incoming.length})</div>
+      <div class="people-list">${incoming.map((r) => requestCard(r, true)).join("") || '<div class="empty">No pending friend requests.</div>'}</div>
+      <div class="requests-subhead" style="margin-top:24px">Sent Requests (${outgoing.length})</div>
+      <div class="people-list">${outgoing.map((r) => requestCard(r, false)).join("") || '<div class="empty">No pending sent requests.</div>'}</div>
+    `;
+  } else if (peopleTab === "friends") {
+    bodyContent = `<div class="card-head"><h2>Your Friends</h2><span class="badge">${friends.length} FRIENDS</span></div>
+      <div class="people-list">${friends.map(accountCard).join("") || '<div class="empty">You have no friends added yet. Send friend requests from the Suggested tab or search above!</div>'}</div>`;
+  } else {
+    bodyContent = `<div class="card-head"><h2>Suggested Listeners</h2><span class="badge">${recommendations.length} SUGGESTIONS</span></div>
+      <p class="muted" style="font-size:12px;margin:-6px 0 14px">Recommendations for you (max 10-20). Other listeners are private unless searched directly.</p>
+      <div class="people-list">${recommendations.map(accountCard).join("") || '<div class="empty">No new suggestions right now. Search above to find friends by handle!</div>'}</div>`;
+  }
+
   frame(
-    `<div class="hero"><div><span class="eyebrow">LISTEN TOGETHER</span><h1>Peoples</h1><p>All registered accounts, plus sessions shared with you.</p></div></div><section class="card"><div class="card-head"><h2>Accounts</h2><span id="people-count" class="badge">${d.people.length} ACCOUNTS</span></div><div id="peoples-list" class="people-list">${d.people.map(accountCard).join("") || '<div class="empty">No accounts yet.</div>'}</div></section>`,
+    `<div class="hero"><div><span class="eyebrow">SOCIAL LISTENING</span><h1>Find Friends</h1><p>Connect with other listeners, manage friend requests, and listen together.</p></div></div>
+    <div class="search-bar-wrap">
+      <form id="people-search-form" class="search-bar">
+        <input id="people-search-input" class="input" placeholder="Search listeners by username or display name..." value="${esc(peopleSearchQuery)}" autocomplete="off">
+        <button type="submit" class="button small">Search</button>
+        ${peopleSearchQuery ? '<button type="button" id="people-search-clear" class="button secondary small">Clear</button>' : ""}
+      </form>
+    </div>
+    <div class="tab-bar">
+      <button class="tab-btn ${!searchResults && peopleTab === "suggested" ? "active" : ""}" data-tab="suggested">Suggested <span class="tab-badge">${recommendations.length}</span></button>
+      <button class="tab-btn ${!searchResults && peopleTab === "requests" ? "active" : ""}" data-tab="requests">Friend Requests <span class="tab-badge ${hasIncoming ? "warning" : ""}">${incoming.length}</span></button>
+      <button class="tab-btn ${!searchResults && peopleTab === "friends" ? "active" : ""}" data-tab="friends">Friends <span class="tab-badge">${friends.length}</span></button>
+    </div>
+    <section class="card">${bodyContent}</section>`,
     "people",
   );
-  bindPeopleActions();
+
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+    btn.onclick = () => {
+      peopleSearchQuery = "";
+      peopleTab = btn.dataset.tab;
+      peoples();
+    };
+  });
+
+  const searchForm = document.querySelector("#people-search-form");
+  searchForm.onsubmit = (e) => {
+    e.preventDefault();
+    const val = document.querySelector("#people-search-input").value.trim();
+    peopleSearchQuery = val;
+    peoples();
+  };
+
+  const clearBtn = document.querySelector("#people-search-clear");
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      peopleSearchQuery = "";
+      peoples();
+    };
+  }
+
+  bindFriendActions(peoples);
+  bindPeopleSessionActions();
+
   clearInterval(poll);
   poll = setInterval(async () => {
     try {
-      const fresh = await api("/peoples");
-      const list = document.querySelector("#peoples-list"),
-        count = document.querySelector("#people-count");
-      if (list)
-        list.innerHTML =
-          fresh.people.map(accountCard).join("") ||
-          '<div class="empty">No accounts yet.</div>';
-      if (count) count.textContent = `${fresh.people.length} ACCOUNTS`;
-      bindPeopleActions();
+      const url = peopleSearchQuery
+        ? `/peoples?q=${encodeURIComponent(peopleSearchQuery)}`
+        : "/peoples";
+      const fresh = await api(url);
+      const badgeReq = document.querySelector(
+        '.tab-btn[data-tab="requests"] .tab-badge',
+      );
+      if (badgeReq) badgeReq.textContent = fresh.incomingRequests?.length || 0;
+      const badgeFriends = document.querySelector(
+        '.tab-btn[data-tab="friends"] .tab-badge',
+      );
+      if (badgeFriends) badgeFriends.textContent = fresh.friends?.length || 0;
     } catch {}
-  }, 6000);
+  }, 8000);
 }
-function bindPeopleActions() {
-  document.querySelectorAll("[data-follow]").forEach(
-    (b) =>
-      (b.onclick = async () => {
-        b.disabled = true;
-        try {
-          const d = await api(
-            `/people/${encodeURIComponent(b.dataset.follow)}/follow`,
-            { method: "POST" },
-          );
-          b.textContent = d.following ? "Following" : "Follow";
-          toast(d.following ? "Following" : "Unfollowed");
-        } catch (e) {
-          toast(e.message);
-        } finally {
-          b.disabled = false;
-        }
-      }),
-  );
+
+function bindPeopleSessionActions() {
   document.querySelectorAll("[data-session]").forEach(
     (b) =>
       (b.onclick = async () => {

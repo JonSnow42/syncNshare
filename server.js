@@ -17,6 +17,10 @@ const random = (n = 24) => crypto.randomBytes(n).toString("base64url");
 const blank = () => ({
   users: [],
   follows: [],
+  friendRequests: [],
+  roomPauseRequests: [],
+  sessionPauseRequests: [],
+  roomHistory: [],
   rooms: [],
   members: [],
   queue: [],
@@ -34,6 +38,10 @@ function normalizeDb(value) {
   for (const key of [
     "users",
     "follows",
+    "friendRequests",
+    "roomPauseRequests",
+    "sessionPauseRequests",
+    "roomHistory",
     "rooms",
     "members",
     "queue",
@@ -55,12 +63,29 @@ function normalizeDb(value) {
       !f.userId ||
       f.hostId === f.userId ||
       closeFriendKeys.has(key) ||
-      !state.follows.some((r) => r.from === f.hostId && r.to === f.userId)
+      !(
+        state.follows.some((r) => r.from === f.hostId && r.to === f.userId) ||
+        state.friendRequests.some(
+          (r) =>
+            r.status === "accepted" &&
+            ((r.from === f.hostId && r.to === f.userId) ||
+              (r.from === f.userId && r.to === f.hostId)),
+        )
+      )
     )
       return false;
     closeFriendKeys.add(key);
     return true;
   });
+  state.friendRequests = state.friendRequests.filter(
+    (r) =>
+      r &&
+      typeof r === "object" &&
+      r.from &&
+      r.to &&
+      r.from !== r.to &&
+      ["pending", "accepted", "declined"].includes(r.status),
+  );
   state.authSessions = state.authSessions.filter(
     (s) =>
       s &&
@@ -263,16 +288,142 @@ function member(roomId, userId) {
 function roomFor(id) {
   return db.rooms.find((r) => r.id === id);
 }
+function areFriends(userId1, userId2) {
+  if (!userId1 || !userId2 || userId1 === userId2) return false;
+  return db.friendRequests.some(
+    (r) =>
+      r.status === "accepted" &&
+      ((r.from === userId1 && r.to === userId2) ||
+        (r.from === userId2 && r.to === userId1)),
+  );
+}
+function getFriendshipStatus(viewerId, targetId) {
+  if (!viewerId || !targetId) return "none";
+  if (viewerId === targetId) return "self";
+  const req = db.friendRequests.find(
+    (r) =>
+      (r.from === viewerId && r.to === targetId) ||
+      (r.from === targetId && r.to === viewerId),
+  );
+  if (!req) return "none";
+  if (req.status === "accepted") return "friends";
+  if (req.status === "pending") {
+    return req.from === viewerId ? "outgoing_pending" : "incoming_pending";
+  }
+  return "none";
+}
+function getFriendsList(userId) {
+  const friendIds = new Set();
+  for (const r of db.friendRequests) {
+    if (r.status === "accepted") {
+      if (r.from === userId) friendIds.add(r.to);
+      else if (r.to === userId) friendIds.add(r.from);
+    }
+  }
+  return db.users.filter((u) => friendIds.has(u.id)).map(safeUser);
+}
+function formatPersonForViewer(person, viewer) {
+  const friendshipStatus = getFriendshipStatus(viewer.id, person.id);
+  const req = db.friendRequests.find(
+    (r) =>
+      (r.from === viewer.id && r.to === person.id) ||
+      (r.from === person.id && r.to === viewer.id),
+  );
+  const following =
+    friendshipStatus === "friends" ||
+    db.follows.some((f) => f.from === viewer.id && f.to === person.id);
+  const active =
+    person.id === viewer.id
+      ? null
+      : db.sessions.find(
+          (s) => s.hostId === person.id && s.status === "active",
+        );
+  const visible =
+    active && active.audience !== "off" && audienceAllows(active, viewer);
+  const activity = visible
+    ? {
+        sessionId: active.id,
+        videoId: active.videoId,
+        title: active.title,
+        playback: active.playback,
+        updatedAt: active.updatedAt,
+        audience: active.audience,
+        participants: (active.participants || []).length,
+        thumbnail: `https://i.ytimg.com/vi/${encodeURIComponent(active.videoId)}/hqdefault.jpg`,
+      }
+    : null;
+  return {
+    ...safeUser(person),
+    friendshipStatus,
+    requestId: req?.id || null,
+    following,
+    isSelf: person.id === viewer.id,
+    activity,
+    sharing: !!visible,
+  };
+}
 function canSeeActivity(owner, viewer) {
   if (!owner) return false;
   if (owner.id === viewer?.id || owner.visibility === "everyone") return true;
-  if (owner.visibility === "followers")
-    return db.follows.some((f) => f.from === viewer?.id && f.to === owner.id);
+  if (owner.visibility === "followers" || owner.visibility === "friends")
+    return (
+      areFriends(owner.id, viewer?.id) ||
+      db.follows.some((f) => f.from === viewer?.id && f.to === owner.id)
+    );
   return false;
+}
+function recordRoomHistory(r) {
+  if (!r.currentQueueId) return;
+  const q = db.queue.find(
+    (item) => item.id === r.currentQueueId && item.roomId === r.id,
+  );
+  if (!q) return;
+  db.roomHistory = db.roomHistory || [];
+  const last = db.roomHistory
+    .filter((h) => h.roomId === r.id)
+    .slice(-1)[0];
+  if (
+    last &&
+    (last.queueId === q.id ||
+      (last.videoId && q.videoId && last.videoId === q.videoId) ||
+      (last.playlistId && q.playlistId && last.playlistId === q.playlistId)) &&
+    Date.now() - (last.playedAt || 0) < 30000
+  ) {
+    return;
+  }
+  db.roomHistory.push({
+    id: random(10),
+    roomId: r.id,
+    queueId: q.id,
+    type: q.type,
+    videoId: q.videoId || null,
+    playlistId: q.playlistId || null,
+    title: q.title,
+    by: q.by,
+    playedAt: Date.now(),
+  });
 }
 function roomView(r, viewer) {
   const host = member(r.id, viewer.id)?.role === "host";
   const nowPlaying = db.queue.find((q) => q.id === r.currentQueueId) || null;
+  const pendingPauseRequests = (db.roomPauseRequests || [])
+    .filter((pr) => pr.roomId === r.id && pr.status === "pending")
+    .map((pr) => {
+      const u = db.users.find((x) => x.id === pr.userId);
+      return {
+        id: pr.id,
+        userId: pr.userId,
+        userName: u?.name || "Member",
+        userUsername: u?.username || "",
+        createdAt: pr.createdAt,
+        isMine: pr.userId === viewer.id,
+      };
+    });
+  const myPauseRequest = pendingPauseRequests.find((pr) => pr.isMine) || null;
+  const history = (db.roomHistory || [])
+    .filter((h) => h.roomId === r.id)
+    .slice(-30)
+    .reverse();
   return {
     id: r.id,
     name: r.name,
@@ -305,37 +456,12 @@ function roomView(r, viewer) {
     messages: db.messages.filter((m) => m.roomId === r.id).slice(-100),
     host,
     nowPlaying,
+    pauseRequests: pendingPauseRequests,
+    myPauseRequest,
+    history,
   };
 }
 async function body(req) {
-  // Vercel's Node.js runtime exposes parsed JSON through req.body. The local
-  // HTTP server does not, so retain the stream parser as the fallback.
-  if ("body" in req) {
-    let parsed;
-    try {
-      parsed = req.body;
-    } catch {
-      throw Object.assign(new Error("Invalid JSON"), { status: 400 });
-    }
-    if (parsed === undefined || parsed === null) return {};
-    if (Buffer.isBuffer(parsed)) parsed = parsed.toString("utf8");
-    if (typeof parsed === "string") {
-      if (Buffer.byteLength(parsed) > 20000)
-        throw Object.assign(new Error("Request too large"), { status: 413 });
-      try {
-        return parsed ? JSON.parse(parsed) : {};
-      } catch {
-        throw Object.assign(new Error("Invalid JSON"), { status: 400 });
-      }
-    }
-    if (typeof parsed === "object") {
-      if (Buffer.byteLength(JSON.stringify(parsed)) > 20000)
-        throw Object.assign(new Error("Request too large"), { status: 413 });
-      return parsed;
-    }
-    throw Object.assign(new Error("Invalid JSON"), { status: 400 });
-  }
-
   let raw = "";
   for await (const c of req) {
     raw += c;
@@ -396,13 +522,15 @@ function activeSessionFor(userId) {
 function audienceAllows(s, viewer) {
   return (
     s.audience === "everyone" ||
-    (s.audience === "followers" &&
-      db.follows.some((f) => f.from === viewer.id && f.to === s.hostId)) ||
+    ((s.audience === "followers" || s.audience === "friends") &&
+      (areFriends(s.hostId, viewer.id) ||
+        db.follows.some((f) => f.from === viewer.id && f.to === s.hostId))) ||
     (s.audience === "close-friends" &&
       db.closeFriends.some(
         (f) => f.hostId === s.hostId && f.userId === viewer.id,
       ) &&
-      db.follows.some((f) => f.from === s.hostId && f.to === viewer.id))
+      (areFriends(s.hostId, viewer.id) ||
+        db.follows.some((f) => f.from === s.hostId && f.to === viewer.id)))
   );
 }
 function sessionCanView(s, user) {
@@ -413,6 +541,20 @@ function sessionView(s, user) {
     throw Object.assign(new Error("Session not found."), { status: 404 });
   const host = db.users.find((u) => u.id === s.hostId);
   const corner = host?.corner || {};
+  const pendingPauseRequests = (db.sessionPauseRequests || [])
+    .filter((pr) => pr.sessionId === s.id && pr.status === "pending")
+    .map((pr) => {
+      const u = db.users.find((x) => x.id === pr.userId);
+      return {
+        id: pr.id,
+        userId: pr.userId,
+        userName: u?.name || "Listener",
+        userUsername: u?.username || "",
+        createdAt: pr.createdAt,
+        isMine: pr.userId === user.id,
+      };
+    });
+  const myPauseRequest = pendingPauseRequests.find((pr) => pr.isMine) || null;
   return {
     id: s.id,
     hostId: s.hostId,
@@ -438,6 +580,8 @@ function sessionView(s, user) {
     messages: db.sessionMessages
       .filter((x) => x.sessionId === s.id)
       .slice(-100),
+    pauseRequests: pendingPauseRequests,
+    myPauseRequest,
   };
 }
 function expireSessions() {
@@ -559,17 +703,19 @@ async function route(req, res) {
       const user = auth(req);
       if (p === "/api/me" && method === "GET") {
         const active = activeSessionFor(user.id);
+        const friends = getFriendsList(user.id);
+        const incomingCount = db.friendRequests.filter(
+          (r) => r.to === user.id && r.status === "pending",
+        ).length;
         return send(res, 200, {
           user: safeUser(user),
-          following: db.follows
-            .filter((f) => f.from === user.id)
-            .map((f) => f.to),
-          followingUsers: db.follows
-            .filter((f) => f.from === user.id)
-            .map((f) => db.users.find((u) => u.id === f.to))
-            .filter(Boolean)
-            .map(safeUser),
-          followers: db.follows.filter((f) => f.to === user.id).length,
+          friends: friends.map((f) => f.id),
+          friendsUsers: friends,
+          friendsCount: friends.length,
+          incomingRequestsCount: incomingCount,
+          following: friends.map((f) => f.id),
+          followingUsers: friends,
+          followers: friends.length,
           activity:
             active && active.audience !== "off"
               ? {
@@ -813,8 +959,10 @@ async function route(req, res) {
       if (p === "/api/close-friends" && method === "GET")
         return send(res, 200, {
           people: db.users
-            .filter((u) =>
-              db.follows.some((f) => f.from === user.id && f.to === u.id),
+            .filter(
+              (u) =>
+                areFriends(user.id, u.id) ||
+                db.follows.some((f) => f.from === user.id && f.to === u.id),
             )
             .map((u) => ({
               ...safeUser(u),
@@ -834,11 +982,14 @@ async function route(req, res) {
           ids.some(
             (id) =>
               id === user.id ||
-              !db.follows.some((f) => f.from === user.id && f.to === id),
+              !(
+                areFriends(user.id, id) ||
+                db.follows.some((f) => f.from === user.id && f.to === id)
+              ),
           )
         )
           throw Object.assign(
-            new Error("Close Friends can only include accounts you follow."),
+            new Error("Close Friends can only include accounts you have friended or followed."),
             { status: 403 },
           );
         db.closeFriends = db.closeFriends.filter((f) => f.hostId !== user.id);
@@ -849,39 +1000,81 @@ async function route(req, res) {
       }
       if (p === "/api/peoples" && method === "GET") {
         expireSessions();
-        const people = db.users.map((person) => {
-          const following = db.follows.some(
-            (f) => f.from === user.id && f.to === person.id,
+        const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+        let searchResults = null;
+        if (q) {
+          const matched = db.users
+            .filter(
+              (u) =>
+                u.id !== user.id &&
+                (u.username.toLowerCase().includes(q) ||
+                  (u.name && u.name.toLowerCase().includes(q))),
+            )
+            .slice(0, 20);
+          searchResults = matched.map((person) =>
+            formatPersonForViewer(person, user),
           );
-          const active =
-            person.id === user.id
-              ? null
-              : db.sessions.find(
-                  (s) => s.hostId === person.id && s.status === "active",
-                );
-          const visible =
-            active && active.audience !== "off" && audienceAllows(active, user);
-          const activity = visible
-            ? {
-                sessionId: active.id,
-                videoId: active.videoId,
-                title: active.title,
-                playback: active.playback,
-                updatedAt: active.updatedAt,
-                audience: active.audience,
-                participants: (active.participants || []).length,
-                thumbnail: `https://i.ytimg.com/vi/${encodeURIComponent(active.videoId)}/hqdefault.jpg`,
-              }
-            : null;
-          return {
-            ...safeUser(person),
-            following,
-            isSelf: person.id === user.id,
-            activity,
-            sharing: !!visible,
-          };
+        }
+
+        // Limit recommendations to 10-20 accounts not yet friended or requested
+        const eligible = db.users.filter(
+          (u) => u.id !== user.id && getFriendshipStatus(user.id, u.id) === "none",
+        );
+        const recommendations = eligible
+          .slice(0, 15)
+          .map((person) => formatPersonForViewer(person, user));
+
+        // Mutual friends
+        const friendIds = new Set();
+        for (const r of db.friendRequests) {
+          if (r.status === "accepted") {
+            if (r.from === user.id) friendIds.add(r.to);
+            else if (r.to === user.id) friendIds.add(r.from);
+          }
+        }
+        const friends = db.users
+          .filter((u) => friendIds.has(u.id))
+          .map((person) => formatPersonForViewer(person, user));
+
+        // Pending incoming and outgoing requests
+        const incomingRequests = db.friendRequests
+          .filter((r) => r.to === user.id && r.status === "pending")
+          .map((r) => {
+            const requester = db.users.find((u) => u.id === r.from);
+            return requester
+              ? {
+                  requestId: r.id,
+                  createdAt: r.createdAt,
+                  user: formatPersonForViewer(requester, user),
+                }
+              : null;
+          })
+          .filter(Boolean);
+
+        const outgoingRequests = db.friendRequests
+          .filter((r) => r.from === user.id && r.status === "pending")
+          .map((r) => {
+            const target = db.users.find((u) => u.id === r.to);
+            return target
+              ? {
+                  requestId: r.id,
+                  createdAt: r.createdAt,
+                  user: formatPersonForViewer(target, user),
+                }
+              : null;
+          })
+          .filter(Boolean);
+
+        const people = searchResults || recommendations;
+        return send(res, 200, {
+          people,
+          recommendations,
+          searchResults,
+          friends,
+          incomingRequests,
+          outgoingRequests,
+          query: q,
         });
-        return send(res, 200, { people });
       }
       if (
         (m = p.match(/^\/api\/sessions\/([^/]+)\/join$/)) &&
@@ -1198,32 +1391,18 @@ async function route(req, res) {
         await save();
         return send(res, 200, { ok: true });
       }
-      if (p === "/api/people" && method === "GET")
+      if (p === "/api/people" && method === "GET") {
+        const eligible = db.users.filter(
+          (u) => u.id !== user.id && getFriendshipStatus(user.id, u.id) === "none",
+        );
+        const recommendations = eligible
+          .slice(0, 15)
+          .map((u) => formatPersonForViewer(u, user));
         return send(res, 200, {
-          people: db.users
-            .filter((u) => u.id !== user.id)
-            .map((u) => {
-              const can = canSeeActivity(u, user);
-              const active = db.rooms.find(
-                (r) => member(r.id, u.id) && r.playback === "playing",
-              );
-              return {
-                ...safeUser(u),
-                following: db.follows.some(
-                  (f) => f.from === user.id && f.to === u.id,
-                ),
-                activity:
-                  can && active
-                    ? {
-                        room: active.name,
-                        track:
-                          db.queue.find((q) => q.id === active.currentQueueId)
-                            ?.title || null,
-                      }
-                    : null,
-              };
-            }),
+          people: recommendations,
+          recommendations,
         });
+      }
       if ((m = p.match(/^\/api\/people\/([^/]+)$/)) && method === "GET") {
         const u = db.users.find((x) => x.username === m[1] || x.id === m[1]);
         if (!u)
@@ -1243,16 +1422,21 @@ async function route(req, res) {
               participants: (active.participants || []).length,
             }
           : null;
+        const friendshipStatus = getFriendshipStatus(user.id, u.id);
+        const reqItem = db.friendRequests.find(
+          (r) =>
+            (r.from === user.id && r.to === u.id) ||
+            (r.from === u.id && r.to === user.id),
+        );
+        const friends = getFriendsList(u.id);
         return send(res, 200, {
           user: safeUser(u),
-          following:
-            u.id !== user.id &&
-            db.follows.some((f) => f.from === user.id && f.to === u.id),
-          followingUsers: db.follows
-            .filter((f) => f.from === u.id)
-            .map((f) => db.users.find((x) => x.id === f.to))
-            .filter(Boolean)
-            .map(safeUser),
+          friendshipStatus,
+          requestId: reqItem?.id || null,
+          following: friendshipStatus === "friends",
+          friendsCount: friends.length,
+          friends,
+          followingUsers: friends,
           activity,
         });
       }
@@ -1264,22 +1448,226 @@ async function route(req, res) {
         if (!to)
           throw Object.assign(new Error("Account not found."), { status: 404 });
         if (to.id === user.id)
-          throw Object.assign(new Error("You cannot follow yourself."), {
+          throw Object.assign(new Error("You cannot add yourself."), {
             status: 400,
           });
-        const matches = db.follows.filter(
-          (f) => f.from === user.id && f.to === to.id,
-        );
-        if (matches.length) {
-          db.follows = db.follows.filter(
-            (f) => !(f.from === user.id && f.to === to.id),
+        const status = getFriendshipStatus(user.id, to.id);
+        let following = false;
+        let newStatus = "none";
+        if (status === "friends") {
+          db.friendRequests = db.friendRequests.filter(
+            (r) =>
+              !(
+                (r.from === user.id && r.to === to.id) ||
+                (r.from === to.id && r.to === user.id)
+              ),
           );
           db.closeFriends = db.closeFriends.filter(
             (f) => !(f.hostId === user.id && f.userId === to.id),
           );
-        } else db.follows.push({ from: user.id, to: to.id });
+          db.follows = db.follows.filter(
+            (f) => !(f.from === user.id && f.to === to.id),
+          );
+          following = false;
+          newStatus = "none";
+        } else if (status === "outgoing_pending") {
+          db.friendRequests = db.friendRequests.filter(
+            (r) => !(r.from === user.id && r.to === to.id),
+          );
+          following = false;
+          newStatus = "none";
+        } else if (status === "incoming_pending") {
+          const reqItem = db.friendRequests.find(
+            (r) => r.from === to.id && r.to === user.id,
+          );
+          if (reqItem) {
+            reqItem.status = "accepted";
+            reqItem.acceptedAt = Date.now();
+          }
+          following = true;
+          newStatus = "friends";
+        } else {
+          db.friendRequests.push({
+            id: random(),
+            from: user.id,
+            to: to.id,
+            status: "pending",
+            createdAt: Date.now(),
+          });
+          following = false;
+          newStatus = "outgoing_pending";
+        }
         await save();
-        return send(res, 200, { following: !matches.length, userId: to.id });
+        return send(res, 200, {
+          following,
+          friendshipStatus: newStatus,
+          userId: to.id,
+        });
+      }
+      if (p === "/api/friends" && method === "GET") {
+        const friends = getFriendsList(user.id);
+        const incomingRequests = db.friendRequests
+          .filter((r) => r.to === user.id && r.status === "pending")
+          .map((r) => {
+            const requester = db.users.find((u) => u.id === r.from);
+            return requester
+              ? {
+                  requestId: r.id,
+                  createdAt: r.createdAt,
+                  user: formatPersonForViewer(requester, user),
+                }
+              : null;
+          })
+          .filter(Boolean);
+        const outgoingRequests = db.friendRequests
+          .filter((r) => r.from === user.id && r.status === "pending")
+          .map((r) => {
+            const target = db.users.find((u) => u.id === r.to);
+            return target
+              ? {
+                  requestId: r.id,
+                  createdAt: r.createdAt,
+                  user: formatPersonForViewer(target, user),
+                }
+              : null;
+          })
+          .filter(Boolean);
+        return send(res, 200, {
+          friends,
+          incomingRequests,
+          outgoingRequests,
+        });
+      }
+      if (p === "/api/friends/request" && method === "POST") {
+        const targetId = String(data.targetId || data.userId || "");
+        const target = db.users.find(
+          (u) => u.id === targetId || u.username === targetId,
+        );
+        if (!target)
+          throw Object.assign(new Error("User not found."), { status: 404 });
+        if (target.id === user.id)
+          throw Object.assign(new Error("You cannot friend yourself."), {
+            status: 400,
+          });
+        const existing = db.friendRequests.find(
+          (r) =>
+            (r.from === user.id && r.to === target.id) ||
+            (r.from === target.id && r.to === user.id),
+        );
+        if (existing) {
+          if (existing.status === "accepted") {
+            return send(res, 200, {
+              ok: true,
+              status: "friends",
+              request: existing,
+            });
+          }
+          if (existing.status === "pending") {
+            if (existing.from === target.id) {
+              existing.status = "accepted";
+              existing.acceptedAt = Date.now();
+              await save();
+              return send(res, 200, {
+                ok: true,
+                status: "friends",
+                request: existing,
+              });
+            }
+            return send(res, 200, {
+              ok: true,
+              status: "outgoing_pending",
+              request: existing,
+            });
+          }
+          existing.status = "pending";
+          existing.from = user.id;
+          existing.to = target.id;
+          existing.createdAt = Date.now();
+          await save();
+          return send(res, 200, {
+            ok: true,
+            status: "outgoing_pending",
+            request: existing,
+          });
+        }
+        const reqItem = {
+          id: random(),
+          from: user.id,
+          to: target.id,
+          status: "pending",
+          createdAt: Date.now(),
+        };
+        db.friendRequests.push(reqItem);
+        await save();
+        return send(res, 201, {
+          ok: true,
+          status: "outgoing_pending",
+          request: reqItem,
+        });
+      }
+      if (p === "/api/friends/accept" && method === "POST") {
+        const reqId = String(data.requestId || "");
+        const userId = String(data.userId || "");
+        const reqItem = db.friendRequests.find(
+          (r) =>
+            (reqId && r.id === reqId) ||
+            (userId && r.from === userId && r.to === user.id),
+        );
+        if (!reqItem || reqItem.to !== user.id)
+          throw Object.assign(new Error("Friend request not found."), {
+            status: 404,
+          });
+        reqItem.status = "accepted";
+        reqItem.acceptedAt = Date.now();
+        await save();
+        return send(res, 200, { ok: true, status: "friends", request: reqItem });
+      }
+      if (p === "/api/friends/decline" && method === "POST") {
+        const reqId = String(data.requestId || "");
+        const userId = String(data.userId || "");
+        const idx = db.friendRequests.findIndex(
+          (r) =>
+            (reqId && r.id === reqId) ||
+            (userId && r.from === userId && r.to === user.id),
+        );
+        if (idx >= 0) {
+          db.friendRequests.splice(idx, 1);
+          await save();
+        }
+        return send(res, 200, { ok: true, status: "none" });
+      }
+      if (p === "/api/friends/cancel" && method === "POST") {
+        const reqId = String(data.requestId || "");
+        const targetId = String(data.targetId || data.userId || "");
+        const idx = db.friendRequests.findIndex(
+          (r) =>
+            (reqId && r.id === reqId && r.from === user.id) ||
+            (targetId && r.from === user.id && r.to === targetId),
+        );
+        if (idx >= 0) {
+          db.friendRequests.splice(idx, 1);
+          await save();
+        }
+        return send(res, 200, { ok: true, status: "none" });
+      }
+      if (p === "/api/friends/remove" && method === "POST") {
+        const targetId = String(data.targetId || data.userId || "");
+        db.friendRequests = db.friendRequests.filter(
+          (r) =>
+            !(
+              (r.from === user.id && r.to === targetId) ||
+              (r.from === targetId && r.to === user.id)
+            ),
+        );
+        db.closeFriends = db.closeFriends.filter(
+          (f) =>
+            !(
+              (f.hostId === user.id && f.userId === targetId) ||
+              (f.hostId === targetId && f.userId === user.id)
+            ),
+        );
+        await save();
+        return send(res, 200, { ok: true, status: "none" });
       }
       if (p === "/api/rooms" && method === "GET")
         return send(res, 200, {
@@ -1460,7 +1848,10 @@ async function route(req, res) {
           createdAt: new Date().toISOString(),
         };
         db.queue.push(q);
-        if (!r.currentQueueId) r.currentQueueId = q.id;
+        if (!r.currentQueueId) {
+          r.currentQueueId = q.id;
+          if (r.playback === "playing") recordRoomHistory(r);
+        }
         await save();
         return send(res, 201, { room: roomView(r, user) });
       }
@@ -1498,9 +1889,234 @@ async function route(req, res) {
             );
           r.playback = data.status;
         }
+        if (
+          r.playback === "playing" ||
+          data.status === "playing" ||
+          (data.queueId !== undefined && r.playback === "playing")
+        ) {
+          recordRoomHistory(r);
+        }
         r.playbackUpdatedAt = Date.now();
         await save();
         return send(res, 200, { room: roomView(r, user) });
+      }
+      if ((m = p.match(/^\/api\/rooms\/([^/]+)\/next$/)) && method === "POST") {
+        const r = requireActiveRoom(m[1], user);
+        if (member(r.id, user.id)?.role !== "host")
+          throw Object.assign(
+            new Error("Only the room host can change shared playback."),
+            { status: 403 },
+          );
+        const roomQueue = db.queue.filter((q) => q.roomId === r.id);
+        if (roomQueue.length === 0)
+          throw Object.assign(new Error("Queue is empty."), { status: 400 });
+        const currentIndex = roomQueue.findIndex((q) => q.id === r.currentQueueId);
+        let nextTrack = null;
+        if (currentIndex === -1) {
+          nextTrack = roomQueue[0];
+        } else if (currentIndex < roomQueue.length - 1) {
+          nextTrack = roomQueue[currentIndex + 1];
+        } else {
+          throw Object.assign(new Error("Already at the end of the queue."), {
+            status: 400,
+          });
+        }
+        r.currentQueueId = nextTrack.id;
+        r.playbackPosition = 0;
+        r.playback = "playing";
+        r.playbackUpdatedAt = Date.now();
+        recordRoomHistory(r);
+        await save();
+        return send(res, 200, { room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/(?:prev|previous)$/)) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        if (member(r.id, user.id)?.role !== "host")
+          throw Object.assign(
+            new Error("Only the room host can change shared playback."),
+            { status: 403 },
+          );
+        const roomQueue = db.queue.filter((q) => q.roomId === r.id);
+        if (roomQueue.length === 0)
+          throw Object.assign(new Error("Queue is empty."), { status: 400 });
+        const currentIndex = roomQueue.findIndex((q) => q.id === r.currentQueueId);
+        let prevTrack = null;
+        if (currentIndex > 0) {
+          prevTrack = roomQueue[currentIndex - 1];
+        } else {
+          throw Object.assign(new Error("Already at the start of the queue."), {
+            status: 400,
+          });
+        }
+        r.currentQueueId = prevTrack.id;
+        r.playbackPosition = 0;
+        r.playback = "playing";
+        r.playbackUpdatedAt = Date.now();
+        recordRoomHistory(r);
+        await save();
+        return send(res, 200, { room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/pause-request$/)) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        const mRole = member(r.id, user.id)?.role;
+        if (!mRole)
+          throw Object.assign(new Error("You are not a member of this room."), {
+            status: 403,
+          });
+        if (mRole === "host") {
+          r.playback = "paused";
+          r.playbackUpdatedAt = Date.now();
+          await save();
+          return send(res, 200, { ok: true, room: roomView(r, user) });
+        }
+        if (r.playback !== "playing") {
+          throw Object.assign(new Error("Playback is already paused."), {
+            status: 400,
+          });
+        }
+        db.roomPauseRequests = db.roomPauseRequests || [];
+        const existing = db.roomPauseRequests.find(
+          (pr) =>
+            pr.roomId === r.id &&
+            pr.userId === user.id &&
+            pr.status === "pending",
+        );
+        if (existing) {
+          return send(res, 200, {
+            ok: true,
+            request: existing,
+            room: roomView(r, user),
+          });
+        }
+        const reqItem = {
+          id: random(10),
+          roomId: r.id,
+          userId: user.id,
+          status: "pending",
+          createdAt: Date.now(),
+        };
+        db.roomPauseRequests.push(reqItem);
+        db.messages.push({
+          id: random(10),
+          roomId: r.id,
+          user: {
+            id: "system",
+            name: "System",
+            username: "system",
+            avatar: "",
+          },
+          text: `⏸ ${user.name} (@${user.username}) requested to pause the video.`,
+          createdAt: new Date().toISOString(),
+        });
+        await save();
+        return send(res, 201, {
+          ok: true,
+          request: reqItem,
+          room: roomView(r, user),
+        });
+      }
+      if (
+        (m = p.match(
+          /^\/api\/rooms\/([^/]+)\/pause-request\/([^/]+)\/approve$/,
+        )) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        if (member(r.id, user.id)?.role !== "host")
+          throw Object.assign(
+            new Error("Only the host can approve pause requests."),
+            { status: 403 },
+          );
+        db.roomPauseRequests = db.roomPauseRequests || [];
+        const reqItem = db.roomPauseRequests.find(
+          (pr) =>
+            pr.roomId === r.id && pr.id === m[2] && pr.status === "pending",
+        );
+        if (!reqItem)
+          throw Object.assign(new Error("Pause request not found."), {
+            status: 404,
+          });
+        reqItem.status = "approved";
+        reqItem.resolvedAt = Date.now();
+        r.playback = "paused";
+        if (data.position !== undefined) {
+          r.playbackPosition = Number(data.position) || r.playbackPosition;
+        }
+        r.playbackUpdatedAt = Date.now();
+        const requester = db.users.find((u) => u.id === reqItem.userId);
+        db.messages.push({
+          id: random(10),
+          roomId: r.id,
+          user: {
+            id: "system",
+            name: "System",
+            username: "system",
+            avatar: "",
+          },
+          text: `⏸ Host approved pause request from ${requester?.name || "member"}. Playback paused.`,
+          createdAt: new Date().toISOString(),
+        });
+        await save();
+        return send(res, 200, { ok: true, room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/pause-request\/([^/]+)\/deny$/)) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        if (member(r.id, user.id)?.role !== "host")
+          throw Object.assign(
+            new Error("Only the host can deny pause requests."),
+            { status: 403 },
+          );
+        db.roomPauseRequests = db.roomPauseRequests || [];
+        const reqItem = db.roomPauseRequests.find(
+          (pr) =>
+            pr.roomId === r.id && pr.id === m[2] && pr.status === "pending",
+        );
+        if (!reqItem)
+          throw Object.assign(new Error("Pause request not found."), {
+            status: 404,
+          });
+        reqItem.status = "denied";
+        reqItem.resolvedAt = Date.now();
+        const requester = db.users.find((u) => u.id === reqItem.userId);
+        db.messages.push({
+          id: random(10),
+          roomId: r.id,
+          user: {
+            id: "system",
+            name: "System",
+            username: "system",
+            avatar: "",
+          },
+          text: `▶ Host denied pause request from ${requester?.name || "member"}. Video continues playing.`,
+          createdAt: new Date().toISOString(),
+        });
+        await save();
+        return send(res, 200, { ok: true, room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/pause-request$/)) &&
+        method === "DELETE"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        db.roomPauseRequests = (db.roomPauseRequests || []).filter(
+          (pr) =>
+            !(
+              pr.roomId === r.id &&
+              pr.userId === user.id &&
+              pr.status === "pending"
+            ),
+        );
+        await save();
+        return send(res, 200, { ok: true, room: roomView(r, user) });
       }
       if (
         (m = p.match(/^\/api\/rooms\/([^/]+)\/queue\/([^/]+)\/vote$/)) &&
@@ -1588,12 +2204,6 @@ async function route(req, res) {
     });
   } catch (e) {
     if (e.code === "ENOENT") return send(res, 404, { error: "Not found" });
-    console.error("API route failed", {
-      method,
-      path: p,
-      name: e.name,
-      code: e.code,
-    });
     send(res, e.status || 500, {
       error: e.status ? e.message : "Something went wrong.",
     });
