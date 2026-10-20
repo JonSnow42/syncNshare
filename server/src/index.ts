@@ -17,6 +17,10 @@ async function bootstrap() {
     const server = http.createServer(app);
 
     // 3. Initialize Socket.IO server on the same HTTP server
+    const allowedOrigins = env.CLIENT_ORIGIN.split(',')
+      .map((o) => o.trim().replace(/\/+$/, ''))
+      .filter(Boolean);
+
     const io = new SocketIOServer<
       ClientToServerEvents,
       ServerToClientEvents,
@@ -24,7 +28,18 @@ async function bootstrap() {
       { user: UserDTO }
     >(server, {
       cors: {
-        origin: env.CLIENT_ORIGIN,
+        origin: (requestOrigin, callback) => {
+          if (!requestOrigin) return callback(null, true);
+          const cleanOrigin = requestOrigin.replace(/\/+$/, '');
+          if (
+            allowedOrigins.includes('*') ||
+            allowedOrigins.includes(cleanOrigin) ||
+            allowedOrigins.some((allowed) => cleanOrigin.endsWith(allowed.replace(/^https?:\/\//, '')))
+          ) {
+            return callback(null, true);
+          }
+          return callback(new Error(`CORS blocked: Origin ${requestOrigin} not permitted.`));
+        },
         credentials: true,
       },
       pingTimeout: 30000,

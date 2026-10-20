@@ -20,10 +20,25 @@ export function createApp(): Express {
     })
   );
 
-  // 2. CORS configuration
+  // 2. CORS configuration (Sanitizes origin to strip trailing slashes & support wildcards/multiple domains)
+  const allowedOrigins = env.CLIENT_ORIGIN.split(',')
+    .map((o) => o.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+
   app.use(
     cors({
-      origin: env.CLIENT_ORIGIN,
+      origin: (requestOrigin, callback) => {
+        if (!requestOrigin) return callback(null, true);
+        const cleanOrigin = requestOrigin.replace(/\/+$/, '');
+        if (
+          allowedOrigins.includes('*') ||
+          allowedOrigins.includes(cleanOrigin) ||
+          allowedOrigins.some((allowed) => cleanOrigin.endsWith(allowed.replace(/^https?:\/\//, '')))
+        ) {
+          return callback(null, true);
+        }
+        return callback(new Error(`CORS blocked: Origin ${requestOrigin} not permitted.`));
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
