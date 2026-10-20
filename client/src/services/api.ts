@@ -15,6 +15,27 @@ import {
 } from '@syncnshare/shared';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const TOKEN_KEY = 'syncnshare_auth_token';
+
+export function getStoredToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token: string | null): void {
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts
+  }
+}
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
@@ -24,10 +45,15 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers.set('Content-Type', 'application/json');
   }
 
+  const token = getStoredToken();
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
   const res = await fetch(url, {
     ...options,
     headers,
-    credentials: 'include', // Send and receive HttpOnly session cookie
+    credentials: 'include', // Send and receive HttpOnly session cookie where supported
   });
 
   const data = await res.json().catch(() => null);
@@ -45,12 +71,20 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 export const api = {
   auth: {
-    register: (input: RegisterInput) =>
-      request<AuthResponse>('/auth/register', { method: 'POST', body: JSON.stringify(input) }),
-    login: (input: LoginInput) =>
-      request<AuthResponse>('/auth/login', { method: 'POST', body: JSON.stringify(input) }),
-    logout: () =>
-      request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+    register: async (input: RegisterInput) => {
+      const res = await request<AuthResponse>('/auth/register', { method: 'POST', body: JSON.stringify(input) });
+      if (res.token) setStoredToken(res.token);
+      return res;
+    },
+    login: async (input: LoginInput) => {
+      const res = await request<AuthResponse>('/auth/login', { method: 'POST', body: JSON.stringify(input) });
+      if (res.token) setStoredToken(res.token);
+      return res;
+    },
+    logout: async () => {
+      setStoredToken(null);
+      return request<{ ok: boolean }>('/auth/logout', { method: 'POST' });
+    },
     me: () =>
       request<{ user: UserDTO }>('/auth/me'),
   },

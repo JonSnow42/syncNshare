@@ -7,7 +7,7 @@ export async function register(req: Request, res: Response, next: NextFunction):
   try {
     const { user, token } = await authService.register(req.body);
     setAuthCookie(res, token);
-    res.status(201).json({ user, message: 'Account registered successfully.' });
+    res.status(201).json({ user, token, message: 'Account registered successfully.' });
   } catch (err) {
     next(err);
   }
@@ -17,7 +17,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
   try {
     const { user, token } = await authService.login(req.body);
     setAuthCookie(res, token);
-    res.status(200).json({ user, message: 'Logged in successfully.' });
+    res.status(200).json({ user, token, message: 'Logged in successfully.' });
   } catch (err) {
     next(err);
   }

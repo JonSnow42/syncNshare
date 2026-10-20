@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { ClientToServerEvents, ServerToClientEvents } from '@syncnshare/shared';
 import { useAuth } from './AuthContext';
+import { getStoredToken } from '../services/api';
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
@@ -27,9 +28,11 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return;
     }
 
+    const token = getStoredToken();
     const socketUrl = import.meta.env.VITE_SOCKET_URL || window.location.origin;
     const newSocket: AppSocket = io(socketUrl, {
       withCredentials: true,
+      auth: token ? { token } : undefined,
       autoConnect: true,
       reconnection: true,
       reconnectionAttempts: 10,

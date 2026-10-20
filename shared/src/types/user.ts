@@ -9,5 +9,6 @@ export interface UserDTO {
 
 export interface AuthResponse {
   user: UserDTO;
+  token?: string;
   message?: string;
 }
